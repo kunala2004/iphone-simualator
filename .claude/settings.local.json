@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(awk NR>=1035 && NR<=1080 *)",
+      "Bash(awk NR>=1043 && NR<=1055 *)",
+      "Bash(awk NR>=1380 && NR<=1410 *)",
+      "Bash(curl *)",
+      "Bash(awk '{print NR\": \"length\\($0\\)}' \"D:\\\\Spook AI\\\\iphone_emulator\\\\emulator.html\")",
+      "Bash(sort -t: -k2 -n -r)",
+      "Bash(python -m http.server 8000)"
+    ]
+  }
+}

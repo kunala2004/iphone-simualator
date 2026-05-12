@@ -1,0 +1,18 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Personal drafts & local recordings (not part of the deployable app)
+intial_text.txt
+script.txt
+*.mp4
+*.mov
+*.webm
+
+# Build / dependency dirs (none today, but future-proof)
+node_modules/
+.vercel/
+.env
+.env.*
