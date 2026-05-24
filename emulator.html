@@ -292,7 +292,8 @@
     max-width: 220px;
     background: transparent;
   }
-  .bubble.image img {
+  .bubble.image img,
+  .bubble.image video {
     width: 100%;
     display: block;
     border-radius: inherit;
@@ -1072,8 +1073,8 @@
     </div>
 
     <h2>Picker Video (sent on video markers)</h2>
-    <input type="text" id="ctrlVideoUrl" value="" placeholder="Video thumbnail URL or local path (e.g. clip1.jpg)" style="margin-bottom:6px;">
-    <input type="file" id="ctrlVideoFile" accept="image/*" style="margin-bottom:6px; color:#aaa; font-size:12px;">
+    <input type="text" id="ctrlVideoUrl" value="" placeholder="Video URL/path (.mp4/.webm/.mov) or poster image" style="margin-bottom:6px;">
+    <input type="file" id="ctrlVideoFile" accept="video/mp4,video/webm,video/quicktime,video/*,image/*" style="margin-bottom:6px; color:#aaa; font-size:12px;">
     <div style="display:flex; gap:6px; align-items:center; margin-bottom:8px;">
       <img id="videoPreview" alt="" style="width:48px; height:48px; object-fit:cover; border-radius:6px; background:#222; border:1px solid #333;">
       <button id="btnClearVideo" class="secondary" style="padding:6px 10px;" title="Clear video">✕</button>
@@ -1614,18 +1615,37 @@ function addMessage(direction, text, isImage = false, isAnimated = false, isVide
 
   if (isVideo) {
     bubble.classList.add('image', 'video');
-    const img = el('img');
     let src = resolveMedia(text, 'video');
-    img.src = src;
-    img.onerror = () => {
-      img.remove();
-      bubble.style.background = '#26252a';
-      bubble.style.minHeight = '140px';
-      bubble.style.minWidth = '180px';
-    };
-    bubble.appendChild(img);
-    const overlay = el('div', 'play-overlay');
-    bubble.appendChild(overlay);
+    const isRealVideo = /^data:video\//i.test(src) || /\.(mp4|webm|mov|m4v|ogv)(\?|$)/i.test(src);
+    if (isRealVideo) {
+      const v = el('video');
+      v.src = src;
+      v.autoplay = true;
+      v.loop = true;
+      v.muted = true;
+      v.playsInline = true;
+      v.setAttribute('playsinline', '');
+      v.setAttribute('webkit-playsinline', '');
+      v.onerror = () => {
+        v.remove();
+        bubble.style.background = '#26252a';
+        bubble.style.minHeight = '140px';
+        bubble.style.minWidth = '180px';
+      };
+      bubble.appendChild(v);
+    } else {
+      const img = el('img');
+      img.src = src;
+      img.onerror = () => {
+        img.remove();
+        bubble.style.background = '#26252a';
+        bubble.style.minHeight = '140px';
+        bubble.style.minWidth = '180px';
+      };
+      bubble.appendChild(img);
+      const overlay = el('div', 'play-overlay');
+      bubble.appendChild(overlay);
+    }
   } else if (isImage) {
     bubble.classList.add('image');
     const img = el('img');
