@@ -6,11 +6,20 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Messages</title>
+<!-- Inter = closest free substitute for SF Pro. We load it from Google Fonts
+     so Playwright/headless Chrome on Linux gets the same metrics as Safari/Mac
+     (avoids the "wrong-aspect-ratio fallback font" issue in automation). -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=block">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { height: 100%; overflow: hidden; background: #000; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, sans-serif;
+    /* Prefer SF Pro on Apple devices, fall back to Inter (loaded above) on
+       everything else (incl. Playwright/Linux headless). Inter has near-identical
+       metrics so text wrap, bubble widths, and emoji rendering stay consistent. */
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Inter", system-ui, sans-serif;
     color: #fff;
     -webkit-font-smoothing: antialiased;
     user-select: none;
@@ -43,15 +52,46 @@
     box-shadow: 0 0 0 3px #1a1a1a, 0 30px 80px rgba(0,0,0,0.6);
   }
 
-  body.recording .controls { display: none; }
-  body.recording .app { grid-template-columns: 1fr; }
+  body.recording .controls,
+  body.hide-controls .controls { display: none; }
+  body.recording .app,
+  body.hide-controls .app { grid-template-columns: 1fr; }
+  /* Recording mode: black backdrop with phone centered at a deterministic
+     aspect ratio. Driven by body[data-aspect]. Default = native iPhone 9:19.5.
+     The phone fits to whichever viewport dimension is binding (height or
+     width), so Playwright can use any viewport size and the output stays
+     pixel-deterministic for the chosen aspect. */
+  body.recording .phone-wrap { background: #000; }
   body.recording .phone {
-    width: 100vw;
-    height: 100vh;
-    aspect-ratio: unset;
     border-radius: 0;
     box-shadow: none;
+    /* Fit-to-viewport using min() of width/height divided by target ratio. */
+    width:  min(100vw, 100vh * var(--ar-w) / var(--ar-h));
+    height: min(100vh, 100vw * var(--ar-h) / var(--ar-w));
+    aspect-ratio: var(--ar-w) / var(--ar-h);
   }
+  /* Aspect-ratio presets. Body[data-aspect="..."] sets the CSS vars. */
+  body { --ar-w: 9; --ar-h: 19.5; }            /* default = iPhone native */
+  body[data-aspect="9:19.5"] { --ar-w: 9;  --ar-h: 19.5; }
+  body[data-aspect="9:16"]   { --ar-w: 9;  --ar-h: 16; }   /* Reels / Shorts / TikTok */
+  body[data-aspect="4:5"]    { --ar-w: 4;  --ar-h: 5; }    /* Instagram portrait post */
+  body[data-aspect="1:1"]    { --ar-w: 1;  --ar-h: 1; }    /* Square */
+  body[data-aspect="16:9"]   { --ar-w: 16; --ar-h: 9; }    /* Landscape / YouTube */
+
+  /* DETERMINISTIC FRAME TIMING — kill all animations/transitions in recording.
+     Playwright/ffmpeg screencast capture needs predictable per-frame output. */
+  body.recording *,
+  body.recording *::before,
+  body.recording *::after {
+    animation-duration: 0.001ms !important;
+    animation-delay: 0s !important;
+    transition-duration: 0.001ms !important;
+    transition-delay: 0s !important;
+  }
+  /* Keep typing-dot pulse and caret-blink visible (they're the only animations
+     that should still tick during recording — but speed them up a touch). */
+  body.recording .typing span { animation: typing-pulse 1.0s infinite ease-in-out !important; }
+  body.recording .caret { animation: caret-blink 1s step-end infinite !important; }
 
   /* ---------- Status bar ---------- */
   .status-bar {
@@ -1459,12 +1499,18 @@ function buildKeyboard() {
 }
 
 function flashKey(charOrSpecial) {
+  // Skip key-flash visual entirely in recording mode — it pollutes frame timing
+  // and the dangling setTimeout queue is what causes the ~90s playback hang
+  // (each call queues an un-awaited 90ms timer that piles up at high speed).
+  if (document.body.classList.contains('recording')) return;
   let key = charOrSpecial.toLowerCase();
   if (charOrSpecial === ' ') key = 'space';
   const keyEl = document.querySelector(`.key[data-key="${key}"]`);
   if (keyEl) {
     keyEl.classList.add('flash');
-    setTimeout(() => keyEl.classList.remove('flash'), 90);
+    // Scale flash duration with playbackSpeed so high-speed playback doesn't
+    // accumulate hundreds of pending timers.
+    setTimeout(() => keyEl.classList.remove('flash'), Math.max(20, 90 / playbackSpeed));
   }
 }
 
@@ -1494,8 +1540,19 @@ function el(tag, className, html) {
 }
 
 function scrollToBottom() {
-  requestAnimationFrame(() => {
+  // Returns a Promise that resolves AFTER the scroll has been applied. Awaiting
+  // this in playback prevents RAF callbacks from queueing faster than they drain
+  // (the cause of the "2.5x stops at 40s" symptom). In recording mode RAF is
+  // often throttled — fall back to immediate scroll so the loop never stalls.
+  if (document.body.classList.contains('recording')) {
     messagesEl.scrollTop = messagesEl.scrollHeight;
+    return Promise.resolve();
+  }
+  return new Promise(resolve => {
+    requestAnimationFrame(() => {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      resolve();
+    });
   });
 }
 
@@ -1550,7 +1607,7 @@ async function pressSend() {
   sendBtn.classList.remove('pressed');
   currentInputText = '';
   updateInputField();
-  addMessage('outgoing', textToSend, false, true);
+  await addMessage('outgoing', textToSend, false, true);
 }
 
 function removeLastStatus() {
@@ -1585,7 +1642,7 @@ function setMessageStatus(label, time) {
   scrollToBottom();
 }
 
-function addMessage(direction, text, isImage = false, isAnimated = false, isVideo = false) {
+async function addMessage(direction, text, isImage = false, isAnimated = false, isVideo = false) {
   removeTyping();
   // Strip "Delivered" off the previous outgoing if a new outgoing comes in
   if (direction === 'outgoing') {
@@ -1613,6 +1670,10 @@ function addMessage(direction, text, isImage = false, isAnimated = false, isVide
     ? (direction === 'incoming' ? 'sms-incoming' : 'sms-outgoing')
     : (direction === 'incoming' ? 'imsg-incoming' : 'imsg-outgoing'));
 
+  // Media bubbles get a Promise we'll await so playback doesn't move on
+  // until the image/video has decoded — otherwise Playwright captures a
+  // frame where the bubble is still sized for the loading placeholder.
+  let mediaReady = null;
   if (isVideo) {
     bubble.classList.add('image', 'video');
     let src = resolveMedia(text, 'video');
@@ -1633,6 +1694,13 @@ function addMessage(direction, text, isImage = false, isAnimated = false, isVide
         bubble.style.minWidth = '180px';
       };
       bubble.appendChild(v);
+      mediaReady = new Promise(resolve => {
+        const done = () => resolve();
+        if (v.readyState >= 2) return done();
+        v.addEventListener('loadeddata', done, { once: true });
+        v.addEventListener('error', done, { once: true });
+        setTimeout(done, 3000); // fallback so a broken src can't hang playback
+      });
     } else {
       const img = el('img');
       img.src = src;
@@ -1645,6 +1713,12 @@ function addMessage(direction, text, isImage = false, isAnimated = false, isVide
       bubble.appendChild(img);
       const overlay = el('div', 'play-overlay');
       bubble.appendChild(overlay);
+      mediaReady = img.decode ? img.decode().catch(() => {}) : new Promise(r => {
+        if (img.complete) return r();
+        img.addEventListener('load', r, { once: true });
+        img.addEventListener('error', r, { once: true });
+        setTimeout(r, 3000);
+      });
     }
   } else if (isImage) {
     bubble.classList.add('image');
@@ -1659,6 +1733,12 @@ function addMessage(direction, text, isImage = false, isAnimated = false, isVide
       bubble.textContent = '[image]';
     };
     bubble.appendChild(img);
+    mediaReady = img.decode ? img.decode().catch(() => {}) : new Promise(r => {
+      if (img.complete) return r();
+      img.addEventListener('load', r, { once: true });
+      img.addEventListener('error', r, { once: true });
+      setTimeout(r, 3000);
+    });
   } else {
     bubble.textContent = text;
   }
@@ -1667,14 +1747,25 @@ function addMessage(direction, text, isImage = false, isAnimated = false, isVide
   messagesEl.appendChild(row);
 
   // Real iMessage: bubble width = longest rendered line, not the full max-width.
-  // After the bubble is laid out, measure each wrapped line via Range API and
-  // tighten the bubble to its widest line + horizontal padding.
-  if (!isImage && !isVideo) tightenBubbleWidth(bubble);
+  // Await both DOM ops so playback never out-runs the renderer (was the cause
+  // of "2.5x stops at 40s" RAF starvation).
+  if (!isImage && !isVideo) await tightenBubbleWidth(bubble);
+
+  // Wait for media to decode before declaring the bubble "added" — otherwise
+  // a Playwright screenshot taken on emulator:bubble-added captures a half-
+  // sized placeholder.
+  if (mediaReady) await mediaReady;
 
   if (direction === 'incoming') lastIncomingBubble = row;
   else lastOutgoingBubble = row;
 
-  scrollToBottom();
+  await scrollToBottom();
+
+  // Broadcast a DOM signal Playwright can wait on.
+  document.dispatchEvent(new CustomEvent('emulator:bubble-added', {
+    detail: { direction, isImage, isVideo, text: (isImage || isVideo) ? null : text }
+  }));
+
   return row;
 }
 
@@ -1721,11 +1812,22 @@ function tightenBubbleWidth(bubble) {
     bubble.style.width = Math.ceil(maxLineWidth + padL + padR + 4) + 'px';
   };
 
-  if (document.fonts && document.fonts.ready) {
-    document.fonts.ready.then(() => requestAnimationFrame(measure));
-  } else {
-    requestAnimationFrame(measure);
+  // Return a Promise so callers can await — eliminates RAF queue buildup at
+  // high playback speed. In recording mode, run measure() synchronously: fonts
+  // are guaranteed loaded by the playback gate (waitForFonts), and skipping RAF
+  // avoids the headless-Chrome RAF-throttle stall.
+  if (document.body.classList.contains('recording')) {
+    measure();
+    return Promise.resolve();
   }
+  return new Promise(resolve => {
+    const run = () => requestAnimationFrame(() => { measure(); resolve(); });
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(run);
+    } else {
+      run();
+    }
+  });
 }
 
 function addDateSeparator(text) {
@@ -2025,7 +2127,7 @@ function applyEasyScript() {
 }
 
 // Pre-existing chat. Reads parsed easyInitialBlocks; falls back to nothing.
-function seedPriorMessages() {
+async function seedPriorMessages() {
   for (const b of easyInitialBlocks) {
     if (b.kind === 'date') {
       addDateSeparator(b.text);
@@ -2035,7 +2137,7 @@ function seedPriorMessages() {
       if (b.isVideo)      content = b.mediaRef || 'VIDEO';
       else if (b.isGif)   { content = b.mediaRef || 'GIF'; asImage = true; }
       else if (b.isImage) content = b.mediaRef || 'PHOTO';
-      addMessage(b.direction, content, asImage, false, !!b.isVideo);
+      await addMessage(b.direction, content, asImage, false, !!b.isVideo);
     }
   }
 }
@@ -2134,7 +2236,7 @@ async function pickerSendSelected() {
 
   // Send the photo
   if (photoSrc) {
-    addMessage('outgoing', photoSrc, true, true);
+    await addMessage('outgoing', photoSrc, true, true);
   }
 }
 
@@ -2315,8 +2417,13 @@ async function runScript() {
   if (isPlaying) return;
   isPlaying = true;
   $('btnPlay').textContent = '⏸ Playing...';
+  document.body.classList.add('is-playing');
+  document.dispatchEvent(new CustomEvent('emulator:started'));
   const steps = parseScript($('ctrlScript').value);
+  let stepIndex = 0;
+  let errored = null;
 
+  try {
   for (const step of steps) {
     if (!isPlaying) break;
     if (step.delay > 0) await sleep(step.delay);
@@ -2326,8 +2433,8 @@ async function runScript() {
       case 'backspace': await backspaceN(parseInt(step.content) || 1); break;
       case 'send': await pressSend(); break;
       case 'clear_input': clearInput(); break;
-      case 'in': addMessage('incoming', step.content); break;
-      case 'out': addMessage('outgoing', step.content, false, true); break;
+      case 'in': await addMessage('incoming', step.content); break;
+      case 'out': await addMessage('outgoing', step.content, false, true); break;
       case 'typing': {
         showTyping();
         await sleep((parseFloat(step.content) || 2) * 1000);
@@ -2337,12 +2444,12 @@ async function runScript() {
         break;
       }
       case 'typing_stop': removeTyping(); break;
-      case 'image_in': addMessage('incoming', step.content, true); break;
-      case 'image_out': addMessage('outgoing', step.content, true, true); break;
-      case 'video_in': addMessage('incoming', step.content, false, false, true); break;
-      case 'video_out': addMessage('outgoing', step.content, false, true, true); break;
-      case 'gif_in':  addMessage('incoming', step.content || 'GIF', true); break;
-      case 'gif_out': addMessage('outgoing', step.content || 'GIF', true, true); break;
+      case 'image_in': await addMessage('incoming', step.content, true); break;
+      case 'image_out': await addMessage('outgoing', step.content, true, true); break;
+      case 'video_in': await addMessage('incoming', step.content, false, false, true); break;
+      case 'video_out': await addMessage('outgoing', step.content, false, true, true); break;
+      case 'gif_in':  await addMessage('incoming', step.content || 'GIF', true); break;
+      case 'gif_out': await addMessage('outgoing', step.content || 'GIF', true, true); break;
       case 'reaction_in_last': addReaction(lastIncomingBubble, step.content || 'heart'); break;
       case 'reaction_out_last': addReaction(lastOutgoingBubble, step.content || 'heart'); break;
       case 'delivered': setMessageStatus('Delivered'); break;
@@ -2361,10 +2468,22 @@ async function runScript() {
       case 'wait': await sleep(parseFloat(step.content) * 1000 || 1000); break;
       case 'clear': clearMessages(); break;
     }
+    stepIndex++;
+    document.dispatchEvent(new CustomEvent('emulator:step', { detail: { index: stepIndex, total: steps.length, action: step.action } }));
   }
-
-  isPlaying = false;
-  $('btnPlay').textContent = '▶ Play Script';
+  } catch (err) {
+    errored = err;
+    console.error('[emulator] runScript error:', err);
+    document.dispatchEvent(new CustomEvent('emulator:error', { detail: { error: String(err), stack: err && err.stack, stepIndex } }));
+  } finally {
+    isPlaying = false;
+    document.body.classList.remove('is-playing');
+    $('btnPlay').textContent = '▶ Play Script';
+    document.body.setAttribute('data-emulator-state', errored ? 'error' : 'done');
+    document.dispatchEvent(new CustomEvent('emulator:done', { detail: { ok: !errored, error: errored ? String(errored) : null, stepsRun: stepIndex, stepsTotal: steps.length } }));
+  }
+  if (errored) throw errored;
+  return { stepsRun: stepIndex, stepsTotal: steps.length };
 }
 
 $('ctrlContactName').addEventListener('input', e => $('contactName').textContent = e.target.value);
@@ -2542,6 +2661,98 @@ messageMode = $('ctrlMode').value;
 updateInputField();
 refreshPovOptions();
 applyEasyScript();
+
+// ============================================================
+// PUBLIC AUTOMATION API — for Playwright / DOM injection drivers.
+// Stable surface; rest of the code is implementation detail.
+// ============================================================
+window.emulator = {
+  // --- Playback ---
+  /** Start playback. Returns a Promise resolving to {stepsRun, stepsTotal} on completion. */
+  play: () => runScript(),
+  /** Stop in-flight playback. Safe to call anytime. */
+  stop: () => { isPlaying = false; },
+  /** Reset chat + re-seed prior messages. */
+  reset: () => { isPlaying = false; applyEasyScript(); $('btnPlay').textContent = '▶ Play Script'; },
+  /** Current playback flag. */
+  get isPlaying() { return isPlaying; },
+
+  // --- Configuration ---
+  /** Set playback speed (e.g. 1.0, 2.0, 3.0). */
+  setSpeed: (v) => {
+    const s = Math.max(0.1, parseFloat(v) || 1.0);
+    playbackSpeed = s;
+    const slider = document.getElementById('ctrlSpeed');
+    if (slider) slider.value = s;
+    const disp = document.getElementById('speedDisplay');
+    if (disp) disp.textContent = s.toFixed(1) + 'x';
+  },
+  get speed() { return playbackSpeed; },
+  /** Enter or exit recording mode (hides controls, locks aspect ratio, disables animations). */
+  setRecording: (on) => {
+    document.body.classList.toggle('recording', !!on);
+    const btn = document.getElementById('btnRecord');
+    if (btn) btn.textContent = on ? '⎚ Exit Recording Mode' : '⎚ Recording Mode';
+  },
+  get isRecording() { return document.body.classList.contains('recording'); },
+  /** Set recording aspect ratio: '9:16' | '9:19.5' | '1:1' | '16:9' | '4:5'. */
+  setAspect: (ratio) => {
+    const valid = ['9:16','9:19.5','1:1','16:9','4:5'];
+    const r = valid.includes(ratio) ? ratio : '9:19.5';
+    document.body.setAttribute('data-aspect', r);
+  },
+  get aspect() { return document.body.getAttribute('data-aspect') || '9:19.5'; },
+
+  // --- Script content ---
+  /** Replace the easy-script textarea and apply. */
+  setScript: (raw) => {
+    const ta = document.getElementById('ctrlScriptRaw');
+    if (ta) ta.value = String(raw || '');
+    applyEasyScript();
+  },
+  /** Read the current (compiled) advanced script. */
+  getScript: () => { const ta = document.getElementById('ctrlScript'); return ta ? ta.value : ''; },
+  /** Set contact name + avatar letter shown in header. */
+  setContact: ({ name, letter, color, unread, time } = {}) => {
+    if (name !== undefined)   { const n = document.getElementById('contactName'); if (n) n.textContent = name; }
+    if (letter !== undefined) { const a = document.getElementById('avatar'); if (a) a.textContent = letter; }
+    if (color !== undefined)  { const a = document.getElementById('avatar'); if (a) a.style.background = color; }
+    if (unread !== undefined) { const u = document.getElementById('unreadBadge'); if (u) u.textContent = unread; }
+    if (time !== undefined)   { const t = document.getElementById('statusTime'); if (t) t.textContent = time; }
+  },
+  /** Wait for fonts + first paint — call this before recording to avoid flash-of-unstyled-text. */
+  waitReady: async () => {
+    if (document.fonts && document.fonts.ready) await document.fonts.ready;
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  },
+  /** Promise that resolves on the next 'emulator:done' event. */
+  waitDone: () => new Promise(resolve => {
+    document.addEventListener('emulator:done', (e) => resolve(e.detail), { once: true });
+  }),
+};
+
+// ============================================================
+// URL-PARAM DRIVER — Playwright can run a recording with just a URL:
+//   ?autoplay=1&recording=1&speed=2.5&aspect=9:16&hide=controls
+// No JS injection needed for the common case.
+// ============================================================
+(async function applyUrlParams() {
+  const p = new URLSearchParams(window.location.search);
+  if (p.get('aspect'))    window.emulator.setAspect(p.get('aspect'));
+  if (p.get('speed'))     window.emulator.setSpeed(p.get('speed'));
+  if (p.get('recording') === '1' || p.get('record') === '1') window.emulator.setRecording(true);
+  if (p.get('hide') === 'controls' || p.get('hidecontrols') === '1') {
+    document.body.classList.add('hide-controls');
+  }
+  // Wait for fonts + DOM settle before signaling ready (and possibly autoplaying).
+  await window.emulator.waitReady();
+  document.body.setAttribute('data-emulator-state', 'ready');
+  document.dispatchEvent(new CustomEvent('emulator:ready'));
+  if (p.get('autoplay') === '1' || p.get('play') === '1') {
+    // Tiny defer so any external listener that just attached can see 'started'.
+    setTimeout(() => window.emulator.play(), 50);
+  }
+})();
 </script>
 
 </body>
